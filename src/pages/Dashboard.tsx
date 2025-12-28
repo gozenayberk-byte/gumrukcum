@@ -1,5 +1,4 @@
-
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { supabase } from '../lib/supabase';
 import { UserProfile, AIAnalysisResult, QueryHistory } from '../types';
 
@@ -16,9 +15,10 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
   const [prompt, setPrompt] = useState('');
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<AIAnalysisResult | null>(null);
-  const [error, setError] = useState('');
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // History State
   const [history, setHistory] = useState<QueryHistory[]>([]);
@@ -26,60 +26,45 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
 
   useEffect(() => {
     fetchProfile();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user]);
 
   useEffect(() => {
     if (activeTab === 'history') {
         fetchHistory();
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab]);
 
   const fetchProfile = async () => {
     try {
         const { data, error } = await supabase.from('profiles').select('*').eq('id', user.id).single();
-        if (data) {
-            setProfile(data);
-        } else {
-            // Fallback for immediate UI update after registration
-            setProfile({
-                id: user.id,
-                email: user.email,
-                credits: 2,
-                subscription_tier: 'free'
-            });
+        
+        if (error) {
+           console.error("Profil çekilemedi:", error);
+           return;
         }
+        if (data) setProfile(data);
     } catch (err) {
-        console.error("Profile fetch error", err);
+        console.error("Profile fetch error:", err);
     }
   };
 
   const fetchHistory = async () => {
       setHistoryLoading(true);
-      const { data, error } = await supabase
-        .from('queries')
-        .select('*')
-        .eq('user_id', user.id)
-        .order('created_at', { ascending: false });
-      
-      if (data) {
-          setHistory(data as QueryHistory[]);
-      }
-      setHistoryLoading(false);
-  };
-
-  // DEMO FUNCTION: Simulate Payment and Upgrade
-  const handleUpgradeDemo = async () => {
-      if (!profile) return;
-      const confirm = window.confirm("Bu işlem demo amaçlıdır. Hesabınız 'Professional' pakete yükseltilsin mi?");
-      if (confirm) {
-          // Update local state immediately for UX
-          setProfile({ ...profile, subscription_tier: 'professional', credits: 999 });
+      try {
+          const { data, error } = await supabase
+            .from('queries')
+            .select('*')
+            .eq('user_id', user.id)
+            .order('created_at', { ascending: false });
           
-          // Update DB
-          await supabase.from('profiles').update({ subscription_tier: 'professional', credits: 999 }).eq('id', user.id);
-          
-          // If we have a result, re-fetch it or unlock it visually (in real app, we might re-run AI with tools)
-          alert("Paketiniz başarıyla yükseltildi! Piyasa analizleri artık görünür.");
+          if (error) throw error;
+          if (data) setHistory(data as QueryHistory[]);
+      } catch (err: any) {
+          console.error("Geçmiş yüklenemedi:", err.message);
+      } finally {
+          setHistoryLoading(false);
       }
   };
 
@@ -94,390 +79,318 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
   };
 
   const handleAnalyze = async () => {
-    if (!profile) return;
+    if (!prompt && !selectedFile) {
+        alert("Lütfen bir ürün tanımı girin veya görsel yükleyin.");
+        return;
+    }
     
-    // Check credits locally first
-    if (profile.credits <= 0 && profile.subscription_tier !== 'professional' && profile.subscription_tier !== 'corporate') {
-        setError('Yetersiz kredi. Lütfen paketinizi yükseltin.');
+    if (profile && profile.credits < 1 && profile.subscription_tier === 'free') {
+        alert("Krediniz bitti. Lütfen paketinizi yükseltin.");
         return;
     }
 
     setLoading(true);
-    setError('');
     setResult(null);
 
+    // 1. Prepare Image
+    let imageBase64 = null;
+    if (selectedFile) {
+        imageBase64 = await new Promise<string>((resolve) => {
+            const reader = new FileReader();
+            reader.onloadend = () => {
+                const base64 = (reader.result as string).split(',')[1];
+                resolve(base64);
+            };
+            reader.readAsDataURL(selectedFile);
+        });
+    }
+
     try {
-      let base64Image = null;
-      if (selectedFile && previewUrl) {
-        base64Image = previewUrl.split(',')[1];
-      }
-
-      const { data, error: funcError } = await supabase.functions.invoke('analyze-product', {
-        body: {
-          userId: user.id,
-          userPrompt: prompt,
-          imageBase64: base64Image,
-          tier: profile.subscription_tier
+        const { data: { session } } = await supabase.auth.getSession();
+        
+        if (!session?.access_token) {
+            throw new Error("Oturum süresi dolmuş. Lütfen tekrar giriş yapın.");
         }
-      });
 
-      if (funcError) throw funcError;
-      if (data && data.error) throw new Error(data.error);
-
-      setResult(data);
-      
-      // Update credits in UI
-      if (profile.subscription_tier !== 'professional' && profile.subscription_tier !== 'corporate') {
-          setProfile({ ...profile, credits: Math.max(0, profile.credits - 1) });
-      }
-
-    } catch (err: any) {
-      console.error("Analysis Error:", err);
-      // MOCK DATA FOR DEMO IF BACKEND FAILS
-      if (err.message === 'Failed to fetch' || err.message.includes('Relay Error')) {
-        await new Promise(resolve => setTimeout(resolve, 2000));
-        const mockResult: AIAnalysisResult = {
-            gtip: "6404.19.90.00.19",
-            productName: prompt || "Demo Ürün Analizi",
-            taxes: [
-                { name: "Gümrük Vergisi", rate: "%12", description: "3. Ülkeler oranı" },
-                { name: "KDV", rate: "%10", description: "İndirimli Oran" }
-            ],
-            documents: ["Ticari Fatura", "Menşe Şehadetnamesi"],
-            riskAnalysis: "Demo modunda çalışıyor. Backend bağlantısını kontrol edin.",
-            marketData: {
-                fobPrice: "$2.50 - $3.00",
-                trSalesPrice: "350 TL",
-                emailDraft: "Dear Supplier, I am interested in your product..."
+        // REAL BACKEND CALL
+        const { data, error } = await supabase.functions.invoke('analyze-product', {
+            body: { 
+                userPrompt: prompt,
+                imageBase64: imageBase64,
+                tier: profile?.subscription_tier 
+            },
+            headers: {
+                Authorization: `Bearer ${session.access_token}` // Yetkilendirme header'ı
             }
-        };
-        setResult(mockResult);
-        // Decrease credit locally for demo
-        if (profile.subscription_tier !== 'professional' && profile.subscription_tier !== 'corporate') {
+        });
+
+        if (error) {
+             throw error;
+        }
+
+        setResult(data);
+
+        // Başarılı olursa krediyi yerel state'te de düş (UI anlık güncellensin)
+        if (profile && profile.subscription_tier !== 'professional' && profile.subscription_tier !== 'corporate') {
             setProfile({ ...profile, credits: Math.max(0, profile.credits - 1) });
         }
-      } else {
-        setError(err.message || 'Analiz sırasında bir hata oluştu.');
-      }
+        
+        // Refresh history silently
+        fetchHistory();
+
+    } catch (err: any) {
+        console.error("Analiz Hatası:", err);
+        // Kullanıcıya GERÇEK hatayı gösteriyoruz.
+        let errorMessage = "Bir hata oluştu.";
+        if (err instanceof Error) errorMessage = err.message;
+        if (err && typeof err === 'object' && 'message' in err) errorMessage = (err as any).message;
+        
+        alert(`Analiz başarısız oldu: ${errorMessage}\n\nLütfen API Keylerinizi ve Edge Function durumunu kontrol edin.`);
     } finally {
-      setLoading(false);
+        setLoading(false);
     }
   };
 
-  const loadHistoryItem = (item: QueryHistory) => {
-      setResult(item.ai_response);
-      setActiveTab('analyze');
-      window.scrollTo({ top: 0, behavior: 'smooth' });
-  };
-
-  const isPro = profile?.subscription_tier === 'professional' || profile?.subscription_tier === 'corporate';
-
   return (
-    <div className="min-h-screen bg-gray-50 font-sans">
-      {/* Header */}
-      <header className="bg-white shadow sticky top-0 z-30">
-        <div className="max-w-7xl mx-auto py-4 px-4 sm:px-6 lg:px-8 flex justify-between items-center">
-          <div className="flex items-center gap-2">
-            <div className="h-8 w-8 bg-indigo-600 rounded-lg flex items-center justify-center text-white font-bold">G</div>
-            <h1 className="text-xl font-bold text-gray-900 hidden sm:block">Gumrukcum Panel</h1>
-          </div>
-          
-          <div className="flex items-center space-x-3 sm:space-x-6">
-            <div className="flex flex-col items-end">
-                <span className="text-xs text-gray-400 font-semibold uppercase tracking-wider">
-                    {profile?.subscription_tier === 'free' ? 'Ücretsiz Paket' : 
-                     profile?.subscription_tier === 'entrepreneur' ? 'Girişimci Paketi' : 
-                     profile?.subscription_tier === 'professional' ? 'Profesyonel Paket' : 'Kurumsal'}
-                </span>
-                <span className={`text-sm font-bold ${profile?.credits === 0 && !isPro ? 'text-red-600' : 'text-indigo-600'}`}>
-                    {isPro ? 'Sınırsız Kredi' : `${profile?.credits} Kredi`}
-                </span>
-            </div>
-            <button onClick={onLogout} className="bg-gray-100 hover:bg-gray-200 text-gray-600 px-4 py-2 rounded-lg text-sm font-medium transition-colors">
-                Çıkış
-            </button>
-          </div>
+    <div className="min-h-screen bg-slate-50 flex flex-col md:flex-row font-sans">
+      
+      {/* SIDEBAR */}
+      <aside className="w-full md:w-72 bg-slate-900 text-white flex flex-col shrink-0 h-auto md:min-h-screen">
+        <div className="p-6 flex items-center gap-3 border-b border-slate-800">
+           <div className="h-8 w-8 bg-indigo-500 rounded-lg flex items-center justify-center font-bold text-white shadow-lg shadow-indigo-500/30">G</div>
+           <span className="font-bold text-xl tracking-tight">Gumrukcum</span>
         </div>
-      </header>
 
-      {/* Tabs */}
-      <div className="max-w-7xl mx-auto mt-6 px-4 sm:px-6 lg:px-8">
-          <div className="border-b border-gray-200">
-            <nav className="-mb-px flex space-x-8" aria-label="Tabs">
-              <button
-                onClick={() => setActiveTab('analyze')}
-                className={`${
-                  activeTab === 'analyze'
-                    ? 'border-indigo-500 text-indigo-600'
-                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
-                } whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm transition-colors`}
-              >
-                Yeni Analiz
-              </button>
-              <button
-                onClick={() => setActiveTab('history')}
-                className={`${
-                  activeTab === 'history'
-                    ? 'border-indigo-500 text-indigo-600'
-                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
-                } whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm transition-colors`}
-              >
-                Geçmiş Sorgular
-              </button>
-            </nav>
-          </div>
-      </div>
-
-      <main className="max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8">
+        <div className="p-6 border-b border-slate-800 bg-slate-800/30">
+            <div className="flex items-center gap-3 mb-2">
+                <div className="w-10 h-10 rounded-full bg-gradient-to-tr from-indigo-500 to-purple-500 flex items-center justify-center font-bold text-lg">
+                    {user.email?.charAt(0).toUpperCase()}
+                </div>
+                <div className="overflow-hidden">
+                    <p className="font-semibold text-sm truncate">{user.email}</p>
+                    <p className="text-xs text-slate-400 capitalize">{profile?.subscription_tier} Plan</p>
+                </div>
+            </div>
+            <div className="mt-4 bg-slate-900 rounded-lg p-3 border border-slate-700">
+                <div className="flex justify-between items-center text-sm mb-1">
+                    <span className="text-slate-400">Kalan Kredi</span>
+                    <span className="font-bold text-indigo-400">{profile?.credits ?? '-'}</span>
+                </div>
+                <div className="w-full bg-slate-700 h-1.5 rounded-full overflow-hidden">
+                    <div 
+                        className="bg-indigo-500 h-full rounded-full transition-all duration-500" 
+                        style={{ width: `${Math.min(100, ((profile?.credits || 0) / 5) * 100)}%` }}
+                    ></div>
+                </div>
+            </div>
+        </div>
         
-        {/* VIEW: ANALYZE */}
-        {activeTab === 'analyze' && (
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-            {/* Input Area */}
-            <div className="lg:col-span-1 space-y-6">
-                <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200">
-                <h2 className="text-lg font-bold text-gray-900 mb-4 flex items-center gap-2">
-                    <svg className="w-5 h-5 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z"></path><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 13a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
-                    Ürün Yükle
-                </h2>
-                
-                <div className="mb-4">
-                    <div className="mt-1 flex justify-center px-6 pt-5 pb-6 border-2 border-gray-300 border-dashed rounded-lg hover:bg-gray-50 transition relative group">
-                    <div className="space-y-1 text-center">
-                        {previewUrl ? (
-                            <div className="relative">
-                                <img src={previewUrl} className="mx-auto h-40 object-contain rounded-md" alt="Preview" />
-                                <button onClick={() => { setPreviewUrl(null); setSelectedFile(null); }} className="absolute -top-3 -right-3 bg-red-100 text-red-600 rounded-full p-1.5 shadow-sm hover:bg-red-200 transition">
-                                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+        <nav className="flex-1 p-4 space-y-2 overflow-y-auto">
+            <button 
+                onClick={() => setActiveTab('analyze')}
+                className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all ${activeTab === 'analyze' ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-900/50' : 'text-slate-400 hover:bg-slate-800 hover:text-white'}`}
+            >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01"></path></svg>
+                <span className="font-medium">Yeni Analiz</span>
+            </button>
+            <button 
+                onClick={() => setActiveTab('history')}
+                className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all ${activeTab === 'history' ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-900/50' : 'text-slate-400 hover:bg-slate-800 hover:text-white'}`}
+            >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                <span className="font-medium">Geçmiş Sorgular</span>
+            </button>
+        </nav>
+
+        <div className="p-4 border-t border-slate-800">
+            <button onClick={onLogout} className="w-full flex items-center gap-2 text-slate-400 hover:text-red-400 px-4 py-2 transition-colors text-sm font-medium">
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"></path></svg>
+                Çıkış Yap
+            </button>
+        </div>
+      </aside>
+
+      {/* MAIN CONTENT */}
+      <main className="flex-1 p-4 md:p-8 overflow-y-auto max-h-screen">
+        <div className="max-w-5xl mx-auto">
+            
+            {/* ANALYZE TAB */}
+            {activeTab === 'analyze' && (
+                <div className="space-y-8 animate-fadeIn">
+                    <header className="mb-8">
+                        <h1 className="text-2xl md:text-3xl font-bold text-slate-900">Gümrük Analizi Başlat</h1>
+                        <p className="text-slate-500 mt-2">Ürün görselini yükleyin veya detaylı açıklama girin. Yapay zeka GTIP ve vergileri hesaplasın.</p>
+                    </header>
+
+                    <div className="bg-white rounded-2xl p-6 md:p-8 shadow-sm border border-slate-200">
+                        <div className="grid md:grid-cols-2 gap-8">
+                            {/* Input Area */}
+                            <div className="space-y-6">
+                                <div>
+                                    <label className="block text-sm font-bold text-slate-700 mb-2">Ürün Açıklaması</label>
+                                    <textarea 
+                                        className="w-full h-32 p-4 rounded-xl border border-slate-300 focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10 outline-none transition-all resize-none text-slate-700"
+                                        placeholder="Örn: Çin'den ithal edilecek, %100 pamuklu, baskılı erkek tişört. Yaklaşık 1000 adet..."
+                                        value={prompt}
+                                        onChange={(e) => setPrompt(e.target.value)}
+                                    ></textarea>
+                                </div>
+
+                                <div>
+                                    <label className="block text-sm font-bold text-slate-700 mb-2">Ürün Görseli (Opsiyonel)</label>
+                                    <div className="relative group">
+                                        <input 
+                                            type="file" 
+                                            accept="image/*" 
+                                            onChange={handleFileChange}
+                                            className="hidden" 
+                                            id="file-upload"
+                                        />
+                                        <label 
+                                            htmlFor="file-upload"
+                                            className={`flex flex-col items-center justify-center w-full h-48 border-2 border-dashed rounded-xl cursor-pointer transition-all ${previewUrl ? 'border-indigo-500 bg-indigo-50' : 'border-slate-300 hover:border-indigo-400 hover:bg-slate-50'}`}
+                                        >
+                                            {previewUrl ? (
+                                                <img src={previewUrl} alt="Preview" className="h-full w-full object-contain rounded-lg p-2" />
+                                            ) : (
+                                                <div className="flex flex-col items-center justify-center pt-5 pb-6 text-slate-400 group-hover:text-indigo-500">
+                                                    <svg className="w-10 h-10 mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"></path></svg>
+                                                    <p className="text-sm font-medium">Görsel Yüklemek İçin Tıkla</p>
+                                                    <p className="text-xs mt-1 opacity-70">PNG, JPG (Max 5MB)</p>
+                                                </div>
+                                            )}
+                                        </label>
+                                    </div>
+                                </div>
+
+                                <button 
+                                    onClick={handleAnalyze}
+                                    disabled={loading}
+                                    className={`w-full py-4 rounded-xl font-bold text-lg shadow-lg shadow-indigo-500/20 transition-all flex items-center justify-center gap-2 ${loading ? 'bg-indigo-400 cursor-not-allowed text-white' : 'bg-indigo-600 hover:bg-indigo-700 text-white hover:-translate-y-1'}`}
+                                >
+                                    {loading ? (
+                                        <>
+                                            <svg className="animate-spin -ml-1 mr-3 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+                                            Analiz Ediliyor...
+                                        </>
+                                    ) : (
+                                        <>
+                                            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19.428 15.428a2 2 0 00-1.022-.547l-2.384-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z"></path></svg>
+                                            AI İle Analiz Et
+                                        </>
+                                    )}
                                 </button>
                             </div>
-                        ) : (
-                            <>
-                                <svg className="mx-auto h-12 w-12 text-gray-400 group-hover:text-indigo-400 transition" stroke="currentColor" fill="none" viewBox="0 0 48 48">
-                                <path d="M28 8H12a4 4 0 00-4 4v20m32-12v8m0 0v8a4 4 0 01-4 4H12a4 4 0 01-4-4v-4m32-4l-3.172-3.172a4 4 0 00-5.656 0L28 28M8 32l9.172-9.172a4 4 0 015.656 0L28 28m0 0l4 4m4-24h8m-4-4v8m-12 4h.02" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-                                </svg>
-                                <div className="text-sm text-gray-600">
-                                <label htmlFor="file-upload" className="relative cursor-pointer bg-white rounded-md font-medium text-indigo-600 hover:text-indigo-500">
-                                    <span>Görsel Yükle</span>
-                                    <input id="file-upload" name="file-upload" type="file" className="sr-only" onChange={handleFileChange} accept="image/*" />
-                                </label>
-                                </div>
-                            </>
-                        )}
-                    </div>
-                    </div>
-                </div>
 
-                <div className="mb-4">
-                    <label className="block text-sm font-medium text-gray-700 mb-2">Notlar (Opsiyonel)</label>
-                    <textarea
-                    className="w-full shadow-sm focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm border border-gray-300 rounded-lg p-3"
-                    rows={3}
-                    placeholder="Ürün materyali, kullanım alanı vb."
-                    value={prompt}
-                    onChange={(e) => setPrompt(e.target.value)}
-                    />
-                </div>
+                            {/* Result Area */}
+                            <div className="bg-slate-50 rounded-xl border border-slate-200 p-6 flex flex-col min-h-[500px]">
+                                {result ? (
+                                    <div className="space-y-6 animate-slideIn">
+                                        <div className="border-b border-slate-200 pb-4">
+                                            <p className="text-xs font-bold text-slate-500 uppercase mb-1">Tespit Edilen GTIP</p>
+                                            <div className="flex items-center gap-3">
+                                                <h2 className="text-2xl font-mono font-bold text-indigo-600 bg-indigo-50 px-3 py-1 rounded-lg border border-indigo-100">{result.gtip}</h2>
+                                                <button onClick={() => navigator.clipboard.writeText(result.gtip)} className="text-slate-400 hover:text-indigo-600" title="Kopyala">
+                                                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path></svg>
+                                                </button>
+                                            </div>
+                                            <p className="text-sm font-medium text-slate-800 mt-2">{result.productName}</p>
+                                        </div>
 
-                {error && <div className="p-3 bg-red-50 text-red-600 text-sm rounded-lg border border-red-100 mb-4 flex items-center gap-2">
-                    <svg className="w-5 h-5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
-                    {error}
-                </div>}
+                                        <div className="grid grid-cols-2 gap-4">
+                                            {result.taxes.map((tax, idx) => (
+                                                <div key={idx} className="bg-white p-3 rounded-lg border border-slate-100 shadow-sm">
+                                                    <p className="text-xs text-slate-500">{tax.name}</p>
+                                                    <p className="text-lg font-bold text-slate-900">{tax.rate}</p>
+                                                </div>
+                                            ))}
+                                        </div>
 
-                <button
-                    onClick={handleAnalyze}
-                    disabled={loading || (!selectedFile && !prompt)}
-                    className={`w-full flex justify-center items-center py-3.5 px-4 border border-transparent rounded-xl shadow-sm text-sm font-bold text-white transition-all ${
-                        loading || (!selectedFile && !prompt) 
-                        ? 'bg-slate-300 cursor-not-allowed' 
-                        : 'bg-indigo-600 hover:bg-indigo-700 hover:shadow-indigo-500/30 shadow-lg transform active:scale-95'
-                    }`}
-                >
-                    {loading ? (
-                        <>
-                            <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-white" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
-                            Analiz Yapılıyor...
-                        </>
-                    ) : 'Analizi Başlat'}
-                </button>
-                </div>
-            </div>
+                                        <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
+                                            <div className="flex items-start gap-3">
+                                                <svg className="w-5 h-5 text-amber-600 mt-0.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path></svg>
+                                                <div>
+                                                    <h4 className="text-sm font-bold text-amber-800 mb-1">Risk Analizi</h4>
+                                                    <p className="text-sm text-amber-900 leading-relaxed">{result.riskAnalysis}</p>
+                                                </div>
+                                            </div>
+                                        </div>
 
-            {/* Results Area */}
-            <div className="lg:col-span-2">
-                {result ? (
-                <div className="bg-white rounded-xl shadow-lg border border-gray-200 overflow-hidden animate-fadeIn">
-                    <div className="bg-slate-900 px-6 py-5 border-b border-slate-800 flex justify-between items-center">
-                        <div className="flex items-center gap-3">
-                            <div className="bg-green-500 p-1.5 rounded-full">
-                                <svg className="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M5 13l4 4L19 7"></path></svg>
-                            </div>
-                            <div>
-                                <h3 className="text-lg font-bold text-white leading-tight">Analiz Tamamlandı</h3>
-                                <p className="text-slate-400 text-xs">{new Date().toLocaleDateString('tr-TR')} • {result.productName}</p>
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <div className="p-6 space-y-8">
-                    {/* GTIP Section */}
-                    <div className="flex flex-col md:flex-row gap-6">
-                        <div className="flex-1 bg-indigo-50 rounded-xl p-5 border border-indigo-100 relative overflow-hidden">
-                            <div className="absolute top-0 right-0 w-24 h-24 bg-indigo-100 rounded-full -mr-12 -mt-12 opacity-50"></div>
-                            <span className="text-xs font-bold text-indigo-500 uppercase tracking-wider block mb-1">Tespit Edilen GTIP</span>
-                            <div className="text-3xl font-mono font-bold text-slate-900 tracking-wider mb-2">{result.gtip}</div>
-                            <p className="text-xs text-indigo-800 bg-indigo-200/50 inline-block px-2 py-1 rounded">
-                                Gümrük Tarife İstatistik Pozisyonu
-                            </p>
-                        </div>
-                        <div className="flex-1 bg-white rounded-xl p-5 border border-slate-200 shadow-sm">
-                            <h4 className="font-bold text-slate-800 mb-3 text-sm uppercase tracking-wide">Risk Analizi</h4>
-                            <p className="text-sm text-slate-600 leading-relaxed">
-                                {result.riskAnalysis}
-                            </p>
-                        </div>
-                    </div>
+                                        {result.marketData && (
+                                            <div className="bg-indigo-50 border border-indigo-200 rounded-lg p-4">
+                                                <h4 className="text-sm font-bold text-indigo-900 mb-2 flex items-center gap-2">
+                                                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6"></path></svg>
+                                                    Piyasa Analizi (Pro)
+                                                </h4>
+                                                <div className="text-sm space-y-1 text-indigo-800">
+                                                    <p><span className="font-semibold">FOB Çin:</span> {result.marketData.fobPrice}</p>
+                                                    <p><span className="font-semibold">TR Satış:</span> {result.marketData.trSalesPrice}</p>
+                                                </div>
+                                            </div>
+                                        )}
 
-                    {/* Taxes */}
-                    <div>
-                        <h4 className="font-bold text-slate-900 mb-4 flex items-center gap-2">
-                            <span className="w-1 h-6 bg-indigo-500 rounded-full"></span>
-                            Vergi Hesaplaması
-                        </h4>
-                        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
-                        {result.taxes.map((tax, i) => (
-                            <div key={i} className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
-                                <div className="text-xs text-slate-500 font-semibold uppercase mb-1">{tax.name}</div>
-                                <div className="text-2xl font-bold text-slate-800">{tax.rate}</div>
-                                <div className="text-xs text-slate-400 mt-2 line-clamp-2">{tax.description}</div>
-                            </div>
-                        ))}
-                        </div>
-                    </div>
-
-                    {/* Market Analysis - BLURRED IF NOT PRO */}
-                    <div className="relative rounded-2xl overflow-hidden border border-slate-200 mt-8">
-                        {/* Header */}
-                        <div className="bg-gradient-to-r from-slate-900 to-slate-800 p-4 flex items-center justify-between">
-                            <h4 className="font-bold text-white flex items-center gap-2">
-                                <svg className="w-5 h-5 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6"></path></svg>
-                                Piyasa ve Fiyat Analizi
-                            </h4>
-                            {!isPro && <span className="text-xs bg-slate-700 text-white px-2 py-1 rounded border border-slate-600">PRO Özellik</span>}
-                        </div>
-
-                        {isPro && result.marketData ? (
-                            // UNLOCKED CONTENT
-                            <div className="p-6 bg-slate-50">
-                                <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
-                                    <div className="bg-white p-4 rounded-lg shadow-sm border border-slate-200">
-                                        <span className="text-xs text-slate-500 uppercase font-bold">Çin FOB Fiyatı</span>
-                                        <div className="text-2xl font-bold text-green-600 mt-1">{result.marketData.fobPrice}</div>
-                                        <p className="text-xs text-slate-400 mt-1">Alibaba/Made-in-China ortalaması</p>
+                                        <div>
+                                            <h4 className="text-sm font-bold text-slate-700 mb-2">Gerekli Belgeler</h4>
+                                            <ul className="space-y-2">
+                                                {result.documents.map((doc, i) => (
+                                                    <li key={i} className="flex items-start gap-2 text-sm text-slate-600">
+                                                        <svg className="w-4 h-4 text-green-500 mt-0.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7"></path></svg>
+                                                        {doc}
+                                                    </li>
+                                                ))}
+                                            </ul>
+                                        </div>
                                     </div>
-                                    <div className="bg-white p-4 rounded-lg shadow-sm border border-slate-200">
-                                        <span className="text-xs text-slate-500 uppercase font-bold">TR Pazar Yeri Satış</span>
-                                        <div className="text-2xl font-bold text-blue-600 mt-1">{result.marketData.trSalesPrice}</div>
-                                        <p className="text-xs text-slate-400 mt-1">Trendyol/Hepsiburada ortalaması</p>
-                                    </div>
-                                </div>
-                                {result.marketData.emailDraft && (
-                                    <div className="bg-white p-4 rounded-lg border border-slate-200">
-                                        <span className="text-xs font-bold text-slate-500 block mb-2 uppercase">Hazır Tedarikçi Maili (İngilizce)</span>
-                                        <pre className="text-xs sm:text-sm text-slate-700 font-mono whitespace-pre-wrap bg-slate-50 p-3 rounded border border-slate-100">
-                                            {result.marketData.emailDraft}
-                                        </pre>
+                                ) : (
+                                    <div className="flex-1 flex flex-col items-center justify-center text-slate-400 opacity-60">
+                                        <svg className="w-16 h-16 mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
+                                        <p className="text-center font-medium">Analiz sonuçları burada görünecek.</p>
                                     </div>
                                 )}
                             </div>
-                        ) : (
-                            // LOCKED CONTENT (BLURRED)
-                            <div className="relative h-64 bg-slate-50 overflow-hidden">
-                                {/* Blurred Fake Content Layer */}
-                                <div className="absolute inset-0 p-6 filter blur-[6px] opacity-60 pointer-events-none select-none">
-                                    <div className="grid grid-cols-2 gap-6 mb-6">
-                                        <div className="bg-white p-4 rounded h-24 w-full"></div>
-                                        <div className="bg-white p-4 rounded h-24 w-full"></div>
-                                    </div>
-                                    <div className="bg-white p-4 rounded h-32 w-full"></div>
-                                </div>
-                                
-                                {/* Overlay Lock UI */}
-                                <div className="absolute inset-0 flex flex-col items-center justify-center z-10 bg-slate-900/5">
-                                    <div className="bg-white p-6 rounded-2xl shadow-xl text-center max-w-sm border border-slate-200">
-                                        <div className="w-12 h-12 bg-amber-100 rounded-full flex items-center justify-center mx-auto mb-4 text-amber-600">
-                                            <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"></path></svg>
-                                        </div>
-                                        <h3 className="text-lg font-bold text-slate-900 mb-2">Fiyat Analizini Aç</h3>
-                                        <p className="text-sm text-slate-500 mb-6">
-                                            Ürünün Çin FOB fiyatını, Türkiye satış fiyatını ve potansiyel kar marjını görmek için paketinizi yükseltin.
-                                        </p>
-                                        <button 
-                                            onClick={handleUpgradeDemo}
-                                            className="w-full bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-600 hover:to-amber-700 text-white font-bold py-3 rounded-xl shadow-lg shadow-amber-500/30 transition-all transform hover:-translate-y-1"
-                                        >
-                                            Profesyonel Pakete Geç
-                                        </button>
-                                    </div>
-                                </div>
-                            </div>
-                        )}
+                        </div>
                     </div>
+                </div>
+            )}
+
+            {/* HISTORY TAB */}
+            {activeTab === 'history' && (
+                <div className="space-y-6 animate-fadeIn">
+                    <header>
+                        <h1 className="text-2xl md:text-3xl font-bold text-slate-900">Geçmiş Analizlerim</h1>
+                    </header>
                     
-                    </div>
-                </div>
-                ) : (
-                <div className="h-full min-h-[500px] bg-white rounded-xl shadow border border-gray-200 flex flex-col items-center justify-center text-gray-400 p-8 text-center transition-all">
-                    <div className="w-24 h-24 bg-gray-50 rounded-full flex items-center justify-center mb-6 border border-gray-100">
-                        <svg className="w-12 h-12 text-indigo-200" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
-                    </div>
-                    <h3 className="text-xl font-bold text-gray-900 mb-2">Analize Hazır</h3>
-                    <p className="max-w-xs mx-auto text-gray-500">Ürün görselini yükleyin ve yapay zekanın mevzuat taramasını başlatın.</p>
-                </div>
-                )}
-            </div>
-            </div>
-        )}
-
-        {/* VIEW: HISTORY */}
-        {activeTab === 'history' && (
-            <div className="bg-white rounded-xl shadow border border-gray-200 overflow-hidden">
-                <div className="px-6 py-5 border-b border-gray-200 bg-gray-50">
-                    <h3 className="text-lg font-bold text-gray-900">Geçmiş Analizler</h3>
-                </div>
-                
-                {historyLoading ? (
-                    <div className="p-12 text-center text-gray-500">Yükleniyor...</div>
-                ) : history.length === 0 ? (
-                    <div className="p-12 text-center text-gray-500 flex flex-col items-center">
-                        <svg className="w-12 h-12 text-gray-300 mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
-                        Henüz hiç analiz yapmadınız.
-                    </div>
-                ) : (
-                    <div className="divide-y divide-gray-200">
-                        {history.map((item) => (
-                            <div key={item.id} className="p-6 hover:bg-gray-50 transition flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
-                                <div>
-                                    <h4 className="font-bold text-gray-900">{item.ai_response.productName || 'İsimsiz Analiz'}</h4>
-                                    <div className="flex items-center gap-3 text-sm text-gray-500 mt-1">
-                                        <span className="bg-gray-200 text-gray-700 px-2 py-0.5 rounded text-xs font-mono">{item.ai_response.gtip}</span>
-                                        <span>• {new Date(item.created_at).toLocaleDateString('tr-TR')} {new Date(item.created_at).toLocaleTimeString('tr-TR', {hour: '2-digit', minute:'2-digit'})}</span>
+                    {historyLoading ? (
+                        <div className="text-center py-10 text-slate-500">Yükleniyor...</div>
+                    ) : history.length > 0 ? (
+                        <div className="grid gap-4">
+                            {history.map((item) => (
+                                <div key={item.id} className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm hover:shadow-md transition-shadow cursor-pointer" onClick={() => {
+                                    setResult(item.ai_response);
+                                    setPrompt(item.user_prompt);
+                                    setActiveTab('analyze');
+                                }}>
+                                    <div className="flex justify-between items-start mb-2">
+                                        <h3 className="font-bold text-slate-900">{item.user_prompt.substring(0, 50)}...</h3>
+                                        <span className="text-xs text-slate-400 bg-slate-100 px-2 py-1 rounded-full">
+                                            {new Date(item.created_at).toLocaleDateString('tr-TR')}
+                                        </span>
                                     </div>
-                                    <p className="text-sm text-gray-500 mt-2 line-clamp-1">{item.user_prompt}</p>
+                                    <div className="flex items-center gap-4 text-sm text-slate-600">
+                                        <span className="bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded font-mono font-medium">{item.ai_response.gtip}</span>
+                                        <span className="truncate">{item.ai_response.productName}</span>
+                                    </div>
                                 </div>
-                                <button 
-                                    onClick={() => loadHistoryItem(item)}
-                                    className="text-indigo-600 hover:text-indigo-800 text-sm font-semibold border border-indigo-200 px-4 py-2 rounded-lg hover:bg-indigo-50 transition-colors whitespace-nowrap"
-                                >
-                                    Raporu Gör
-                                </button>
-                            </div>
-                        ))}
-                    </div>
-                )}
-            </div>
-        )}
-
+                            ))}
+                        </div>
+                    ) : (
+                        <div className="text-center py-20 bg-white rounded-xl border border-slate-200 border-dashed">
+                            <p className="text-slate-400">Henüz hiç analiz yapmadınız.</p>
+                        </div>
+                    )}
+                </div>
+            )}
+        </div>
       </main>
     </div>
   );

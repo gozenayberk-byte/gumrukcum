@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { supabase } from './lib/supabase';
+import { supabase, isMockMode } from './lib/supabase';
 import LandingPage from './pages/LandingPage';
 import Dashboard from './pages/Dashboard';
 
@@ -15,11 +15,16 @@ const App: React.FC = () => {
   useEffect(() => {
     const checkSession = async () => {
       try {
+        if (isMockMode) {
+            // In mock mode, check local storage or just wait
+            setLoading(false);
+            return;
+        }
         const { data: { session }, error } = await supabase.auth.getSession();
         if (error) throw error;
         setSession(session);
       } catch (err) {
-        console.warn("Session check failed (likely missing env vars or network issue):", err);
+        console.warn("Session check failed:", err);
       } finally {
         setLoading(false);
       }
@@ -40,6 +45,35 @@ const App: React.FC = () => {
   const handleAuth = async (e: React.FormEvent) => {
     e.preventDefault();
     setAuthError('');
+    
+    // MOCK AUTH HANDLING
+    if (isMockMode) {
+        // Simulate a network delay
+        await new Promise(resolve => setTimeout(resolve, 800));
+        
+        const mockUser = {
+            id: 'mock-user-id-123',
+            email: email || 'demo@gumrukcum.net',
+            user_metadata: {},
+            app_metadata: {},
+            aud: 'authenticated',
+            created_at: new Date().toISOString()
+        };
+        
+        const mockSession = {
+            access_token: 'mock-token',
+            refresh_token: 'mock-refresh-token',
+            expires_in: 3600,
+            token_type: 'bearer',
+            user: mockUser
+        };
+        
+        setSession(mockSession);
+        setShowAuthModal(false);
+        alert("Demo modunda giriş yapıldı. (API Anahtarları eksik)");
+        return;
+    }
+
     try {
         if (authView === 'login') {
             const { error } = await supabase.auth.signInWithPassword({ email, password });
@@ -60,11 +94,19 @@ const App: React.FC = () => {
       setShowAuthModal(true);
   };
 
+  const handleLogout = async () => {
+      if (isMockMode) {
+          setSession(null);
+      } else {
+          await supabase.auth.signOut();
+      }
+  };
+
   if (loading) return <div className="min-h-screen flex items-center justify-center bg-slate-50 text-slate-600 font-medium">Yükleniyor...</div>;
 
   // 1. Session exists -> Dashboard
   if (session) {
-      return <Dashboard user={session.user} onLogout={() => supabase.auth.signOut()} />;
+      return <Dashboard user={session.user} onLogout={handleLogout} />;
   }
 
   // 2. No session -> Landing Page with optional Modal

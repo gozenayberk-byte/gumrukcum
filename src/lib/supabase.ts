@@ -22,11 +22,18 @@ const getEnvVar = (key: string) => {
   return '';
 };
 
-const supabaseUrl = getEnvVar('VITE_SUPABASE_URL') || 'https://placeholder.supabase.co';
-const supabaseAnonKey = getEnvVar('VITE_SUPABASE_ANON_KEY') || 'placeholder-key';
+const supabaseUrl = getEnvVar('VITE_SUPABASE_URL');
+const supabaseAnonKey = getEnvVar('VITE_SUPABASE_ANON_KEY');
 
-if (supabaseUrl === 'https://placeholder.supabase.co') {
-  console.warn('Supabase keys are missing. App is running in placeholder mode. Real backend calls will fail.');
+// Production Check: Anahtarlar yoksa konsola hata bas, ancak uygulamayı fake moda alma.
+if (!supabaseUrl || !supabaseAnonKey) {
+  console.error('CRITICAL: Supabase API keys are missing in .env file!');
 }
 
-export const supabase = createClient(supabaseUrl, supabaseAnonKey);
+// isMockMode değişkenini kaldırdık, her zaman gerçek bağlantı denenecek.
+export const isMockMode = false;
+
+export const supabase = createClient(
+  supabaseUrl || 'https://placeholder.supabase.co', 
+  supabaseAnonKey || 'placeholder'
+);
