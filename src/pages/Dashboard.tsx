@@ -40,7 +40,7 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
         if (data) {
             setProfile(data);
         } else {
-            // Demo/Fallback setup if DB trigger fails or delayed
+            // Fallback for immediate UI update after registration
             setProfile({
                 id: user.id,
                 email: user.email,
@@ -77,6 +77,8 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
           
           // Update DB
           await supabase.from('profiles').update({ subscription_tier: 'professional', credits: 999 }).eq('id', user.id);
+          
+          // If we have a result, re-fetch it or unlock it visually (in real app, we might re-run AI with tools)
           alert("Paketiniz başarıyla yükseltildi! Piyasa analizleri artık görünür.");
       }
   };
@@ -143,13 +145,17 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
             ],
             documents: ["Ticari Fatura", "Menşe Şehadetnamesi"],
             riskAnalysis: "Demo modunda çalışıyor. Backend bağlantısını kontrol edin.",
-            marketData: profile.subscription_tier === 'professional' ? {
+            marketData: {
                 fobPrice: "$2.50 - $3.00",
                 trSalesPrice: "350 TL",
-                emailDraft: "Dear Supplier..."
-            } : undefined
+                emailDraft: "Dear Supplier, I am interested in your product..."
+            }
         };
         setResult(mockResult);
+        // Decrease credit locally for demo
+        if (profile.subscription_tier !== 'professional' && profile.subscription_tier !== 'corporate') {
+            setProfile({ ...profile, credits: Math.max(0, profile.credits - 1) });
+        }
       } else {
         setError(err.message || 'Analiz sırasında bir hata oluştu.');
       }
