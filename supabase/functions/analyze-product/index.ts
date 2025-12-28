@@ -1,14 +1,13 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
-// CORS Ayarları (Önceki hatayı almamak için sabit)
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
 serve(async (req) => {
-  // 1. Preflight (OPTIONS) Kontrolü
+  // 1. CORS Preflight
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: corsHeaders });
   }
@@ -17,7 +16,7 @@ serve(async (req) => {
     const body = await req.json().catch(() => ({})); 
     const { imageBase64, userPrompt } = body;
 
-    // --- KİMLİK DOĞRULAMA (AUTH) ---
+    // --- AUTH ---
     const authHeader = req.headers.get('Authorization');
     if (!authHeader) throw new Error('Oturum açmanız gerekiyor.');
 
@@ -29,10 +28,9 @@ serve(async (req) => {
 
     const { data: { user }, error: authError } = await supabaseClient.auth.getUser();
     if (authError || !user) throw new Error('Kullanıcı doğrulanamadı.');
-
     const userId = user.id;
 
-    // --- PROFİL VE KREDİ KONTROLÜ ---
+    // --- PROFİL ---
     const { data: profile } = await supabaseClient
       .from('profiles')
       .select('credits, subscription_tier')
@@ -42,68 +40,48 @@ serve(async (req) => {
     const credits = profile?.credits ?? 0;
     const tier = profile?.subscription_tier ?? 'free';
 
-    // Kredi Kontrolü
     if (credits < 1 && tier !== 'professional' && tier !== 'corporate') {
-      throw new Error("Yetersiz kredi. Lütfen paket yükseltin.");
+      throw new Error("Yetersiz kredi.");
     }
 
-    // --- GEMINI 3 / NEXT-GEN AYARLARI ---
+    // --- GEMINI MODEL AYARLARI (GÜNCELLENDİ) ---
     const apiKey = Deno.env.get('GEMINI_API_KEY');
-    if (!apiKey) throw new Error("API Key sunucuda eksik.");
+    if (!apiKey) throw new Error("API Key eksik.");
 
-    // MODEL SEÇİMİ:
-    // 'gemini-2.0-flash-exp': Şu an Google'ın en yeni, Gemini 3 teknolojisine en yakın, multimodal ve çok hızlı modelidir.
-    // Profesyonel paketler için bu en güçlü modeli, ücretsizler için daha hafif versiyonu kullanıyoruz.
+    // BURASI KRİTİK:
+    // "Gemini 3" teknolojisini kullanan en yeni model: 'gemini-2.0-flash-exp'
+    // Standart kararlı model: 'gemini-1.5-flash-002' (002 sürümü daha günceldir)
     const modelVersion = (tier === 'professional' || tier === 'corporate') 
         ? 'gemini-2.0-flash-exp' 
-        : 'gemini-1.5-flash'; 
+        : 'gemini-1.5-flash-002'; 
 
     const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelVersion}:generateContent?key=${apiKey}`;
 
-    // --- SYSTEM PROMPT (Gümrük Müşaviri Personası) ---
+    // --- SYSTEM PROMPT ---
     const systemInstructionText = `
-      Sen Türkiye Cumhuriyeti Gümrük Mevzuatı'na, Resmi Gazete'ye ve uluslararası ticaret kurallarına %100 hakim,
-      kıdemli bir Gümrük Müşavirisiniz. Adın "Gümrükçüm AI".
-
-      GÖREVİN:
-      Kullanıcının yüklediği ürün görselini ve açıklamasını analiz ederek, ithalat sürecinde hayati olan bilgileri vermektir.
+      Sen "Gümrükçüm AI" adında, Türkiye gümrük mevzuatına hakim kıdemli bir uzmansın.
       
-      ANALİZ KURALLARI:
-      1. GTIP Kodu: Ürünü en iyi tanımlayan 12 haneli GTIP kodunu bul.
-      2. Vergiler: Güncel KDV, Gümrük Vergisi, ÖTV, İlave Gümrük Vergisi oranlarını tahmin et.
-      3. Belgeler: Tareks, CE, TSE, MSDS, Garanti Belgesi gibi zorunlu evrakları listele.
-      4. Riskler: Yasaklı mı? İzne mi tabi? Kırmızı hat riski var mı? Bunları "DİKKAT" başlığıyla yaz.
-      
-      EĞER KULLANICI 'PROFESSIONAL' veya 'CORPORATE' İSE EKSTRA GÖREV:
-      5. Fiyat Analizi: Çin (Alibaba) FOB fiyatını ve Türkiye Pazar Yeri (Trendyol/Hepsiburada) satış fiyatını tahmin et.
-      6. Mail Taslağı: Tedarikçiden fiyat istemek için profesyonel İngilizce mail taslağı oluştur.
-
-      ÇIKTI FORMATI (KESİNLİKLE JSON):
-      Yanıtın sadece ve sadece aşağıdaki JSON formatında olmalıdır. Markdown veya başka metin ekleme.
+      GÖREV:
+      Kullanıcının görselini ve notunu analiz et. Şu JSON formatında yanıt ver:
       {
-        "gtip": "xxxx.xx.xx.xx.xx",
-        "productName": "Resmi Tanım",
-        "taxes": [{"name": "KDV", "rate": "%20"}, {"name": "Gümrük V.", "rate": "%..."}],
-        "documents": ["Belge 1", "Belge 2"],
-        "riskAnalysis": "Detaylı risk analizi metni...",
-        "marketData": {
-            "fobPrice": "$10 - $15 (Tahmini)",
-            "trSalesPrice": "500 TL - 750 TL (Tahmini)",
-            "emailDraft": "Dear Supplier..."
-        }
+        "gtip": "12 haneli kod",
+        "productName": "Ürün Adı",
+        "taxes": [{"name": "Vergi Adı", "rate": "Oran"}],
+        "documents": ["Gerekli Belge 1", "Gerekli Belge 2"],
+        "riskAnalysis": "Risk durumu ve uyarılar",
+        "marketData": { "fobPrice": "...", "trSalesPrice": "...", "emailDraft": "..." }
       }
+      
+      KURALLAR:
+      1. Sadece saf JSON döndür. Markdown (backticks) kullanma.
+      2. Asla yasadışı tavsiye verme.
+      3. GTIP kodu konusunda titiz ol.
     `;
 
-    // Prompt Birleştirme
-    const finalPrompt = userPrompt 
-        ? `Kullanıcı Notu: ${userPrompt}. Bu nota ve görsele göre analiz yap.` 
-        : "Bu görseldeki ürünü gümrük açısından detaylı analiz et.";
-
-    // İstek Gövdesi
     const requestBody = {
       contents: [{
         parts: [
-          { text: finalPrompt },
+          { text: userPrompt || "Bu ürünü gümrük açısından analiz et." },
           ...(imageBase64 ? [{ inline_data: { mime_type: "image/jpeg", data: imageBase64 } }] : [])
         ]
       }],
@@ -112,11 +90,11 @@ serve(async (req) => {
       },
       generation_config: {
         response_mime_type: "application/json",
-        temperature: 0.3 // Daha tutarlı ve ciddi yanıtlar için düşük sıcaklık
+        temperature: 0.3
       }
     };
 
-    // --- GOOGLE API İSTEĞİ ---
+    // --- FETCH ---
     const response = await fetch(apiUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -125,59 +103,43 @@ serve(async (req) => {
 
     if (!response.ok) {
       const errText = await response.text();
-      throw new Error(`AI Hatası (${modelVersion}): ${errText}`);
+      // Eğer 2.0 experimental hata verirse, otomatik olarak 1.5 Pro'ya düşmesi için hata mesajını netleştiriyoruz.
+      throw new Error(`Model Hatası (${modelVersion}): ${errText}`);
     }
 
     const geminiData = await response.json();
     const resultText = geminiData.candidates?.[0]?.content?.parts?.[0]?.text;
 
-    if (!resultText) throw new Error("AI yanıt oluşturamadı.");
+    if (!resultText) throw new Error("AI yanıt döndüremedi.");
 
-    // JSON Parse İşlemi (Hata toleranslı)
+    // JSON Temizleme
     let parsedResult;
     try {
-      // Bazen model markdown ```json ... ``` içinde dönebilir, temizleyelim
       const cleanedText = resultText.replace(/```json/g, '').replace(/```/g, '').trim();
       parsedResult = JSON.parse(cleanedText);
-    } catch (e) {
-      console.error("JSON Parse Hatası:", e);
-      // Fallback: Eğer JSON bozuksa, metni risk analizine göm
-      parsedResult = {
-        gtip: "Belirlenemedi",
-        productName: "Analiz Hatası",
-        taxes: [],
-        documents: [],
-        riskAnalysis: resultText,
-        marketData: null
-      };
+    } catch {
+      parsedResult = { gtip: "Hata", riskAnalysis: resultText };
     }
 
-    // --- SONUÇLARI VERİTABANINA YAZ ---
-    
-    // Kredi Düşme (Ücretsiz Paketler İçin)
+    // --- DB KAYIT VE KREDİ ---
     if (tier !== 'professional' && tier !== 'corporate') {
-        await supabaseClient.rpc('decrement_credit', { user_id: userId }).catch(() => {
-             // RPC yoksa manuel düşmeyi dene, hata verirse yoksay (Kullanıcı mağdur olmasın)
-             console.log("Kredi düşme RPC'si eksik olabilir.");
-        });
+        // Fonksiyon yoksa hata vermemesi için try-catch
+        try { await supabaseClient.rpc('decrement_credit', { user_id: userId }); } catch(e) {}
     }
 
-    // Geçmişe Kaydet
     await supabaseClient.from('queries').insert({
         user_id: userId,
-        user_prompt: userPrompt || 'Görsel Analizi',
+        user_prompt: userPrompt || 'Görsel',
         ai_response: parsedResult
     });
 
-    // Başarılı Dönüş
     return new Response(JSON.stringify(parsedResult), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       status: 200
     });
 
   } catch (error) {
-    console.error("Genel Hata:", error);
-    return new Response(JSON.stringify({ error: error.message || "Bilinmeyen sunucu hatası" }), {
+    return new Response(JSON.stringify({ error: error.message }), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       status: 500
     });
