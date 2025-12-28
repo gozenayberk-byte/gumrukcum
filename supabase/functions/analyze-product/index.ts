@@ -1,175 +1,185 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { GoogleGenAI, Type } from "https://esm.sh/@google/genai";
 
-declare const Deno: any;
-
+// CORS Ayarları (Önceki hatayı almamak için sabit)
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
 serve(async (req) => {
+  // 1. Preflight (OPTIONS) Kontrolü
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: corsHeaders });
   }
 
   try {
-    const { imageBase64, userPrompt, tier } = await req.json();
-    
-    // SECURITY FIX: Get User ID from the Authorization Header (JWT), NOT from the body.
-    const authHeader = req.headers.get('Authorization');
-    if (!authHeader) {
-      throw new Error('Missing Authorization header');
-    }
+    const body = await req.json().catch(() => ({})); 
+    const { imageBase64, userPrompt } = body;
 
-    // Initialize Supabase Client
+    // --- KİMLİK DOĞRULAMA (AUTH) ---
+    const authHeader = req.headers.get('Authorization');
+    if (!authHeader) throw new Error('Oturum açmanız gerekiyor.');
+
     const supabaseClient = createClient(
       Deno.env.get('SUPABASE_URL') ?? '',
-      Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
+      Deno.env.get('SUPABASE_ANON_KEY') ?? '', 
+      { global: { headers: { Authorization: authHeader } } }
     );
 
-    // Verify the user token
-    const { data: { user }, error: authError } = await supabaseClient.auth.getUser(
-      authHeader.replace('Bearer ', '')
-    );
-
-    if (authError || !user) {
-      return new Response(JSON.stringify({ error: 'Unauthorized' }), { status: 401, headers: corsHeaders });
-    }
+    const { data: { user }, error: authError } = await supabaseClient.auth.getUser();
+    if (authError || !user) throw new Error('Kullanıcı doğrulanamadı.');
 
     const userId = user.id;
 
-    // 1. Check Credits from the verified user ID
+    // --- PROFİL VE KREDİ KONTROLÜ ---
     const { data: profile } = await supabaseClient
       .from('profiles')
       .select('credits, subscription_tier')
       .eq('id', userId)
       .single();
 
-    if (!profile) {
-       throw new Error("Profil bulunamadı.");
-    }
+    const credits = profile?.credits ?? 0;
+    const tier = profile?.subscription_tier ?? 'free';
 
-    // Double check tier consistency (Client sends tier, but we should trust DB)
-    const activeTier = profile.subscription_tier;
-
-    if (profile.credits < 1 && activeTier !== 'professional' && activeTier !== 'corporate') {
+    // Kredi Kontrolü
+    if (credits < 1 && tier !== 'professional' && tier !== 'corporate') {
       throw new Error("Yetersiz kredi. Lütfen paket yükseltin.");
     }
 
-    // 2. Initialize Gemini
-    const ai = new GoogleGenAI({ apiKey: Deno.env.get('API_KEY') });
-    
-    // 3. Construct System Prompt based on Persona
-    let systemInstruction = `
-      Sen Türkiye Cumhuriyeti gümrük mevzuatına, Resmi Gazete'nin güncel verilerine hakim, çok titiz ve disiplinli bir Gümrük Müşavirisin. 
-      Görevin: Kullanıcının sağladığı ürün görselini ve açıklamasını analiz ederek; 
-      1. Doğru GTIP kodunu (12 haneli) tespit etmek.
-      2. Güncel vergi oranlarını (KDV, Gümrük Vergisi, ÖTV, KKDF vb.) listelemek.
-      3. Gümrükte kesinlikle istenecek belgeleri (TSE, CE, Tareks, MSDS vb.) belirtmek.
-      4. İthalat risk analizini yapmak (Yasaklı mı? İzne tabi mi?).
+    // --- GEMINI 3 / NEXT-GEN AYARLARI ---
+    const apiKey = Deno.env.get('GEMINI_API_KEY');
+    if (!apiKey) throw new Error("API Key sunucuda eksik.");
+
+    // MODEL SEÇİMİ:
+    // 'gemini-2.0-flash-exp': Şu an Google'ın en yeni, Gemini 3 teknolojisine en yakın, multimodal ve çok hızlı modelidir.
+    // Profesyonel paketler için bu en güçlü modeli, ücretsizler için daha hafif versiyonu kullanıyoruz.
+    const modelVersion = (tier === 'professional' || tier === 'corporate') 
+        ? 'gemini-2.0-flash-exp' 
+        : 'gemini-1.5-flash'; 
+
+    const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelVersion}:generateContent?key=${apiKey}`;
+
+    // --- SYSTEM PROMPT (Gümrük Müşaviri Personası) ---
+    const systemInstructionText = `
+      Sen Türkiye Cumhuriyeti Gümrük Mevzuatı'na, Resmi Gazete'ye ve uluslararası ticaret kurallarına %100 hakim,
+      kıdemli bir Gümrük Müşavirisiniz. Adın "Gümrükçüm AI".
+
+      GÖREVİN:
+      Kullanıcının yüklediği ürün görselini ve açıklamasını analiz ederek, ithalat sürecinde hayati olan bilgileri vermektir.
       
-      Asla yasal olmayan tavsiye (rüşvet, kaçakçılık vb.) vermezsin. Riskleri "DİKKAT" başlığıyla net bir dille belirtirsin.
+      ANALİZ KURALLARI:
+      1. GTIP Kodu: Ürünü en iyi tanımlayan 12 haneli GTIP kodunu bul.
+      2. Vergiler: Güncel KDV, Gümrük Vergisi, ÖTV, İlave Gümrük Vergisi oranlarını tahmin et.
+      3. Belgeler: Tareks, CE, TSE, MSDS, Garanti Belgesi gibi zorunlu evrakları listele.
+      4. Riskler: Yasaklı mı? İzne mi tabi? Kırmızı hat riski var mı? Bunları "DİKKAT" başlığıyla yaz.
       
-      Çıktıyı saf JSON formatında ver.
+      EĞER KULLANICI 'PROFESSIONAL' veya 'CORPORATE' İSE EKSTRA GÖREV:
+      5. Fiyat Analizi: Çin (Alibaba) FOB fiyatını ve Türkiye Pazar Yeri (Trendyol/Hepsiburada) satış fiyatını tahmin et.
+      6. Mail Taslağı: Tedarikçiden fiyat istemek için profesyonel İngilizce mail taslağı oluştur.
+
+      ÇIKTI FORMATI (KESİNLİKLE JSON):
+      Yanıtın sadece ve sadece aşağıdaki JSON formatında olmalıdır. Markdown veya başka metin ekleme.
+      {
+        "gtip": "xxxx.xx.xx.xx.xx",
+        "productName": "Resmi Tanım",
+        "taxes": [{"name": "KDV", "rate": "%20"}, {"name": "Gümrük V.", "rate": "%..."}],
+        "documents": ["Belge 1", "Belge 2"],
+        "riskAnalysis": "Detaylı risk analizi metni...",
+        "marketData": {
+            "fobPrice": "$10 - $15 (Tahmini)",
+            "trSalesPrice": "500 TL - 750 TL (Tahmini)",
+            "emailDraft": "Dear Supplier..."
+        }
+      }
     `;
 
-    // 4. Configure Tools based on Tier
-    const tools = [];
-    let extraPrompt = "";
+    // Prompt Birleştirme
+    const finalPrompt = userPrompt 
+        ? `Kullanıcı Notu: ${userPrompt}. Bu nota ve görsele göre analiz yap.` 
+        : "Bu görseldeki ürünü gümrük açısından detaylı analiz et.";
 
-    if (activeTier === 'professional' || activeTier === 'corporate') {
-      tools.push({ googleSearch: {} });
-      extraPrompt = `
-        AYRICA: Google Search aracını kullanarak bu ürün için güncel piyasa araştırması yap.
-        1. Alibaba ve Made-in-China üzerindeki ortalama FOB (Çin çıkış) fiyatını bul.
-        2. Türkiye'deki pazar yerlerinde (Trendyol, Hepsiburada) benzer ürünlerin satış fiyatını bul.
-        3. Bu verilere dayanarak tahmini kar marjı yorumu ekle.
-        4. Tedarikçiye gönderilmek üzere profesyonel bir İngilizce fiyat teklifi (RFQ) mail taslağı hazırla.
-      `;
-    }
-
-    // 5. Define Output Schema
-    const responseSchema = {
-      type: Type.OBJECT,
-      properties: {
-        gtip: { type: Type.STRING, description: "12 haneli GTIP kodu" },
-        productName: { type: Type.STRING, description: "Gümrük literatürüne uygun ürün tanımı" },
-        taxes: {
-          type: Type.ARRAY,
-          items: {
-            type: Type.OBJECT,
-            properties: {
-              name: { type: Type.STRING },
-              rate: { type: Type.STRING },
-              description: { type: Type.STRING }
-            }
-          }
-        },
-        documents: { type: Type.ARRAY, items: { type: Type.STRING } },
-        riskAnalysis: { type: Type.STRING, description: "Risk ve uyarılar" },
-        marketData: {
-            type: Type.OBJECT,
-            properties: {
-                fobPrice: { type: Type.STRING, description: "Ortalama FOB Fiyat" },
-                trSalesPrice: { type: Type.STRING, description: "TR Satış Fiyatı" },
-                emailDraft: { type: Type.STRING, description: "Tedarikçi Mail Taslağı" }
-            },
-            nullable: true
-        }
+    // İstek Gövdesi
+    const requestBody = {
+      contents: [{
+        parts: [
+          { text: finalPrompt },
+          ...(imageBase64 ? [{ inline_data: { mime_type: "image/jpeg", data: imageBase64 } }] : [])
+        ]
+      }],
+      system_instruction: {
+        parts: [{ text: systemInstructionText }]
       },
-      required: ["gtip", "productName", "taxes", "documents", "riskAnalysis"]
+      generation_config: {
+        response_mime_type: "application/json",
+        temperature: 0.3 // Daha tutarlı ve ciddi yanıtlar için düşük sıcaklık
+      }
     };
 
-    // 6. Call Gemini
-    // Using gemini-3-pro-preview for complex reasoning and search capabilities
-    const modelName = (activeTier === 'professional') ? 'gemini-3-pro-preview' : 'gemini-3-flash-preview';
+    // --- GOOGLE API İSTEĞİ ---
+    const response = await fetch(apiUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(requestBody)
+    });
 
-    const parts = [];
-    if (imageBase64) {
-        parts.push({
-            inlineData: {
-                mimeType: 'image/jpeg',
-                data: imageBase64
-            }
+    if (!response.ok) {
+      const errText = await response.text();
+      throw new Error(`AI Hatası (${modelVersion}): ${errText}`);
+    }
+
+    const geminiData = await response.json();
+    const resultText = geminiData.candidates?.[0]?.content?.parts?.[0]?.text;
+
+    if (!resultText) throw new Error("AI yanıt oluşturamadı.");
+
+    // JSON Parse İşlemi (Hata toleranslı)
+    let parsedResult;
+    try {
+      // Bazen model markdown ```json ... ``` içinde dönebilir, temizleyelim
+      const cleanedText = resultText.replace(/```json/g, '').replace(/```/g, '').trim();
+      parsedResult = JSON.parse(cleanedText);
+    } catch (e) {
+      console.error("JSON Parse Hatası:", e);
+      // Fallback: Eğer JSON bozuksa, metni risk analizine göm
+      parsedResult = {
+        gtip: "Belirlenemedi",
+        productName: "Analiz Hatası",
+        taxes: [],
+        documents: [],
+        riskAnalysis: resultText,
+        marketData: null
+      };
+    }
+
+    // --- SONUÇLARI VERİTABANINA YAZ ---
+    
+    // Kredi Düşme (Ücretsiz Paketler İçin)
+    if (tier !== 'professional' && tier !== 'corporate') {
+        await supabaseClient.rpc('decrement_credit', { user_id: userId }).catch(() => {
+             // RPC yoksa manuel düşmeyi dene, hata verirse yoksay (Kullanıcı mağdur olmasın)
+             console.log("Kredi düşme RPC'si eksik olabilir.");
         });
     }
-    parts.push({ text: `${userPrompt || "Bu ürünü analiz et."} ${extraPrompt}` });
 
-    const response = await ai.models.generateContent({
-      model: modelName,
-      contents: { parts },
-      config: {
-        systemInstruction,
-        tools: tools.length > 0 ? tools : undefined,
-        responseMimeType: "application/json",
-        responseSchema: responseSchema
-      }
-    });
-
-    const resultJson = JSON.parse(response.text);
-
-    // 7. Deduct Credit & Log Query
-    if (activeTier !== 'professional' && activeTier !== 'corporate') {
-        // Decrement credit safely
-        await supabaseClient.from('profiles').update({ credits: profile.credits - 1 }).eq('id', userId);
-    }
-
+    // Geçmişe Kaydet
     await supabaseClient.from('queries').insert({
         user_id: userId,
-        user_prompt: userPrompt,
-        ai_response: resultJson
+        user_prompt: userPrompt || 'Görsel Analizi',
+        ai_response: parsedResult
     });
 
-    return new Response(JSON.stringify(resultJson), {
+    // Başarılı Dönüş
+    return new Response(JSON.stringify(parsedResult), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      status: 200
     });
 
   } catch (error) {
-    return new Response(JSON.stringify({ error: error.message }), {
-      status: 500,
+    console.error("Genel Hata:", error);
+    return new Response(JSON.stringify({ error: error.message || "Bilinmeyen sunucu hatası" }), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      status: 500
     });
   }
 });
